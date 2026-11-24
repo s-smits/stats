@@ -89,7 +89,7 @@ internal class Popup: PopupWrapper {
     private let frequencyCache = PopupCache<CPU_Frequency?>()
     private let limitCache = PopupCache<CPU_Limit>()
     private let averageCache = PopupCache<CPU_AverageLoad>()
-    private let fleetCache = PopupCache<CPU_FleetLoad?>()
+    private let fleetCache = PopupCache<CPU_FleetLine?>()
     private var fleetView: FleetLoadView? = nil
     
     private var processes: ProcessesView? = nil
@@ -551,11 +551,11 @@ internal class Popup: PopupWrapper {
         self.average15Field?.stringValue = "\(value.load15)"
     }
     
-    public func fleetCallback(_ value: CPU_FleetLoad?) {
+    public func fleetCallback(_ value: CPU_FleetLine?) {
         self.apply(value, to: self.fleetCache, render: self.renderFleet)
     }
     
-    private func renderFleet(_ value: CPU_FleetLoad?) {
+    private func renderFleet(_ value: CPU_FleetLine?) {
         self.fleetView?.render(value)
     }
     

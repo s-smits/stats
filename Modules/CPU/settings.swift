@@ -87,7 +87,7 @@ internal class Settings: NSStackView, Settings_v {
         
         if FleetLoad.available {
             self.addArrangedSubview(PreferencesSection([
-                PreferencesRow(localizedString("Show fleet load (bun run runs loadwatch)"), component: self.switchView(
+                PreferencesRow(localizedString("Show fleet load"), component: self.switchView(
                     action: #selector(self.toggleFleetLoad),
                     state: FleetLoad.enabled
                 ))

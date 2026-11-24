@@ -13,7 +13,7 @@ import Cocoa
 import Kit
 
 internal class Preview: PreviewWrapper {
-    private let chartHistory = LineChartData(capacity: 600)
+    private let chartHistory = LineChartData(capacity: FleetLoad.capacity)
     private var latestLoad: CPU_Load?
     private var latestAverage: CPU_AverageLoad?
     private var latestFrequency: CPU_Frequency?
@@ -76,11 +76,21 @@ internal class Preview: PreviewWrapper {
     private var cores: [CoreView] = []
     private var processes: ProcessesView? = nil
     private var processesSection: PreferencesSection? = nil
-    private var fleetSection: PreferencesSection? = nil
-    private var fleetRows: NSStackView? = nil
-    private var fleetLabels: [String] = []
-    private var fleetFields: [ValueField] = []
-    private var latestFleet: CPU_FleetLoad? = nil
+    private var titleField: LabelField? = nil
+    private var clustersField: LabelField? = nil
+    private var remoteProcesses: [(name: LabelField, value: ValueField)] = []
+    
+    /// Every machine the fleet command reports, in its order, each with fifteen minutes of readings.
+    private var fleet: [FleetHost] = []
+    private var picker: NSSegmentedControl? = nil
+    /// The machine the page shows, by label; empty for this Mac.
+    private var selected: String = Store.shared.string(key: FleetLoad.selectedKey, defaultValue: "")
+    /// The page's machine and its number of cores when it was built, which a change rebuilds.
+    private var shown: String = ""
+    
+    private var remotes: [FleetHost] { self.fleet.filter { !$0.local } }
+    private var remote: FleetHost? { self.remotes.first { $0.label == self.selected } }
+    private var shape: String { self.remote.map { "\($0.label)#\($0.coreKinds.count)" } ?? "" }
     
     private var numberOfProcesses: Int {
         Store.shared.int(key: "\(self.module.stringValue)_processes", defaultValue: 8)
@@ -91,28 +101,41 @@ internal class Preview: PreviewWrapper {
     }
     
     public override func loadContent() {
-        self.addArrangedSubview(PreferencesSection([self.totalView()]))
-        self.addArrangedSubview(PreferencesSection(title: localizedString("Usage history"), [self.historyView()]))
-        self.addArrangedSubview(PreferencesSection(title: localizedString("Load per core"), [self.coresView()]))
+        let host = self.remote
+        self.shown = self.shape
+        
+        let picker = self.pickerView()
+        self.addArrangedSubview(picker)
+        picker.widthAnchor.constraint(equalTo: self.widthAnchor).isActive = true
+        
+        self.addArrangedSubview(PreferencesSection([self.totalView(host)]))
+        self.addArrangedSubview(PreferencesSection(title: localizedString("Usage history"), [self.historyView(host?.usage ?? self.chartHistory)]))
+        self.addArrangedSubview(PreferencesSection(title: localizedString("Load per core"), [
+            self.coresView(host?.coreKinds ?? SystemKit.shared.device.info.cpu?.cores ?? [])
+        ]))
         
         let splitView = NSStackView()
         splitView.orientation = .horizontal
         splitView.distribution = .fillEqually
         splitView.addArrangedSubview(PreferencesSection(title: localizedString("Average load"), [self.averageView()]))
-        splitView.addArrangedSubview(PreferencesSection(title: localizedString("Frequency"), [self.frequencyView()]))
+        if host == nil {
+            splitView.addArrangedSubview(PreferencesSection(title: localizedString("Frequency"), [self.frequencyView()]))
+        }
         
         self.addArrangedSubview(splitView)
         
-        self.addArrangedSubview(self.fleetView())
-        self.addArrangedSubview(self.topProcesses())
+        self.addArrangedSubview(host == nil ? self.topProcesses() : self.remoteProcessesView())
         
         self.addArrangedSubview(NSView())
         
+        if let host {
+            self.renderRemote(host)
+            return
+        }
         if let value = self.latestLoad { self.renderLoad(value) }
         if let value = self.latestAverage { self.renderAverage(value) }
         if let value = self.latestFrequency { self.renderFrequency(value) }
         if let list = self.latestProcesses { self.renderProcesses(list) }
-        self.renderFleet(self.latestFleet)
     }
     
     public override func unloadContent() {
@@ -135,10 +158,10 @@ internal class Preview: PreviewWrapper {
         self.pCoresFreqField = nil
         self.processes = nil
         self.processesSection = nil
-        self.fleetSection = nil
-        self.fleetRows = nil
-        self.fleetLabels = []
-        self.fleetFields = []
+        self.titleField = nil
+        self.clustersField = nil
+        self.remoteProcesses = []
+        self.picker = nil
         self.initialized = false
         self.initializedAverage = false
         self.initializedFrequency = false
@@ -149,7 +172,7 @@ internal class Preview: PreviewWrapper {
         fatalError("init(coder:) has not been implemented")
     }
     
-    private func totalView() -> NSView {
+    private func totalView(_ host: FleetHost?) -> NSView {
         let view = NSStackView()
         view.distribution = .fill
         view.orientation = .horizontal
@@ -177,7 +200,9 @@ internal class Preview: PreviewWrapper {
             var titleValue = localizedString("Unknown")
             var clastersValue = localizedString("Unknown")
             
-            if let cpu = SystemKit.shared.device.info.cpu {
+            if let host {
+                (titleValue, clastersValue) = host.title
+            } else if let cpu = SystemKit.shared.device.info.cpu {
                 if let name = cpu.name {
                     titleValue = name
                 }
@@ -196,10 +221,14 @@ internal class Preview: PreviewWrapper {
                 }
             }
             
+            let titleField = LabelField(titleValue, size: 13)
+            let clustersField = LabelField(clastersValue, size: 11)
+            self.titleField = titleField
+            self.clustersField = clustersField
             let title = NSStackView()
-            title.addArrangedSubview(LabelField(titleValue, size: 13))
+            title.addArrangedSubview(titleField)
             title.addArrangedSubview(NSView())
-            title.addArrangedSubview(LabelField(clastersValue, size: 11))
+            title.addArrangedSubview(clustersField)
             
             let bar = BarChartView(size: 9, horizontal: true)
             self.bar = bar
@@ -232,14 +261,14 @@ internal class Preview: PreviewWrapper {
         return view
     }
     
-    private func historyView() -> NSView {
+    private func historyView(_ history: LineChartData) -> NSView {
         let view: NSStackView = NSStackView()
         view.orientation = .vertical
         view.distribution = .fillEqually
         view.spacing = Constants.Settings.margin*2
         view.heightAnchor.constraint(equalToConstant: 140).isActive = true
         
-        let chart = LineChartView(history: self.chartHistory)
+        let chart = LineChartView(history: history)
         chart.setColor(self.chartColor)
         chart.setLegend(x: true, y: true)
         self.loadLineChart = chart
@@ -248,7 +277,7 @@ internal class Preview: PreviewWrapper {
         return view
     }
     
-    private func coresView() -> NSView {
+    private func coresView(_ cores: [core_s]) -> NSView {
         let view: NSStackView = NSStackView()
         view.orientation = .horizontal
         view.distribution = .fillEqually
@@ -264,7 +293,7 @@ internal class Preview: PreviewWrapper {
         rightColumn.distribution = .fillEqually
         rightColumn.spacing = Constants.Settings.margin/2
         
-        if let cpu = SystemKit.shared.device.info.cpu, let cores = cpu.cores {
+        do {
             var e = 0
             var p = 0
             var s = 0
@@ -335,17 +364,71 @@ internal class Preview: PreviewWrapper {
         return view
     }
     
-    private func fleetView() -> NSView {
+    private func pickerView() -> NSSegmentedControl {
+        let picker = NSSegmentedControl(labels: [], trackingMode: .selectOne, target: self, action: #selector(self.pick))
+        picker.segmentDistribution = .fillEqually
+        self.picker = picker
+        self.updatePicker()
+        return picker
+    }
+    
+    /// This Mac, then every other machine the fleet command reports; hidden while it reports none.
+    private func updatePicker() {
+        guard let picker = self.picker else { return }
+        let remotes = self.remotes
+        let labels = [localizedString("This Mac")] + remotes.map { $0.label }
+        if picker.segmentCount != labels.count || labels.indices.contains(where: { picker.label(forSegment: $0) != labels[$0] }) {
+            picker.segmentCount = labels.count
+            for (i, label) in labels.enumerated() {
+                picker.setLabel(label, forSegment: i)
+            }
+        }
+        for (i, host) in remotes.enumerated() {
+            picker.setToolTip(host.state == "read" ? nil : localizedString(host.state == "unreachable" ? "Unreachable" : "Connecting…"), forSegment: i + 1)
+        }
+        picker.selectedSegment = remotes.firstIndex { $0.label == self.selected }.map { $0 + 1 } ?? 0
+        picker.isHidden = remotes.isEmpty
+    }
+    
+    @objc private func pick(_ sender: NSSegmentedControl) {
+        let remotes = self.remotes
+        let i = sender.selectedSegment
+        self.selected = i > 0 && i <= remotes.count ? remotes[i - 1].label : ""
+        Store.shared.set(key: FleetLoad.selectedKey, value: self.selected)
+        // Rebuild after the control's own action returns, since the rebuild replaces it.
+        DispatchQueue.main.async { self.reload() }
+    }
+    
+    private func reload() {
+        guard self.contentLoaded else { return }
+        self.unloadContent()
+        self.loadContent()
+    }
+    
+    private func remoteProcessesView() -> NSView {
         let view = NSStackView()
         view.orientation = .vertical
         view.distribution = .fillEqually
         view.spacing = 2
-        self.fleetRows = view
         
-        let section = PreferencesSection(title: localizedString("Fleet load"), [view])
-        section.toolTip = "bun run runs loadwatch --once · cpu now, then the 1, 5 and 15 minute load against the cores"
-        section.isHidden = true
-        self.fleetSection = section
+        self.remoteProcesses = (0..<max(self.numberOfProcesses, 0)).map { _ in
+            let row = NSStackView()
+            row.heightAnchor.constraint(equalToConstant: 22).isActive = true
+            row.orientation = .horizontal
+            row.distribution = .fill
+            let name = LabelField("")
+            name.font = NSFont.systemFont(ofSize: 11, weight: .regular)
+            let value = ValueField("")
+            value.font = NSFont.systemFont(ofSize: 12, weight: .regular)
+            row.addArrangedSubview(name)
+            row.addArrangedSubview(NSView())
+            row.addArrangedSubview(value)
+            view.addArrangedSubview(row)
+            return (name, value)
+        }
+        
+        let section = PreferencesSection(title: localizedString("Top processes"), [view])
+        section.isHidden = self.numberOfProcesses == 0
         return section
     }
     
@@ -370,6 +453,7 @@ internal class Preview: PreviewWrapper {
         self.processes?.setNumberOfProcesses(self.numberOfProcesses)
         self.processesSection?.isHidden = self.numberOfProcesses == 0
         self.initializedProcesses = false
+        if self.remote != nil { self.reload() }
     }
     
     public func processCallback(_ list: [TopProcess]?) {
@@ -401,6 +485,7 @@ internal class Preview: PreviewWrapper {
         DispatchQueue.main.async(execute: {
             self.latestLoad = value
             self.chartHistory.append(sample)
+            guard self.remote == nil else { return }
             self.loadLineChart?.historyUpdated()
             guard self.contentLoaded else { return }
             self.renderLoad(value)
@@ -408,31 +493,36 @@ internal class Preview: PreviewWrapper {
     }
     
     private func renderLoad(_ value: CPU_Load) {
+        guard self.remote == nil else { return }
         if (self.window?.isVisible ?? false) || !self.initialized {
-            self.circle?.toolTip = "\(localizedString("CPU usage")): \(Int(value.totalUsage.rounded(toPlaces: 2) * 100))%"
-            self.circle?.setValue(value.totalUsage)
-            self.circle?.setSegments([
-                ColorValue(value.systemLoad, color: self.systemColor),
-                ColorValue(value.userLoad, color: self.userColor)
-            ])
-            self.circle?.setNonActiveSegmentColor(self.idleColor)
-            
-            self.systemField?.stringValue = "\(Int(value.systemLoad.rounded(toPlaces: 2) * 100))%"
-            self.userField?.stringValue = "\(Int(value.userLoad.rounded(toPlaces: 2) * 100))%"
-            self.idleField?.stringValue = "\(Int(value.idleLoad.rounded(toPlaces: 2) * 100))%"
-            
-            self.bar?.setValues([
-                ColorValue(value.systemLoad, color: self.systemColor),
-                ColorValue(value.userLoad, color: self.userColor)
-            ])
-            
-            for (i, v) in value.usagePerCore.enumerated() {
-                if let core = self.cores.first(where: {$0.identifier?.rawValue == "\(i)" }) {
-                    core.setValue(v)
-                }
-            }
-            
+            self.renderSplit(total: value.totalUsage, system: value.systemLoad, user: value.userLoad, idle: value.idleLoad, perCore: value.usagePerCore)
             self.initialized = true
+        }
+    }
+    
+    /// The circle, the bar, the split and each core, out of 1.
+    private func renderSplit(total: Double, system: Double, user: Double, idle: Double, perCore: [Double]) {
+        self.circle?.toolTip = "\(localizedString("CPU usage")): \(Int(total.rounded(toPlaces: 2) * 100))%"
+        self.circle?.setValue(total)
+        self.circle?.setSegments([
+            ColorValue(system, color: self.systemColor),
+            ColorValue(user, color: self.userColor)
+        ])
+        self.circle?.setNonActiveSegmentColor(self.idleColor)
+        
+        self.systemField?.stringValue = "\(Int(system.rounded(toPlaces: 2) * 100))%"
+        self.userField?.stringValue = "\(Int(user.rounded(toPlaces: 2) * 100))%"
+        self.idleField?.stringValue = "\(Int(idle.rounded(toPlaces: 2) * 100))%"
+        
+        self.bar?.setValues([
+            ColorValue(system, color: self.systemColor),
+            ColorValue(user, color: self.userColor)
+        ])
+        
+        for (i, v) in perCore.enumerated() {
+            if let core = self.cores.first(where: {$0.identifier?.rawValue == "\(i)" }) {
+                core.setValue(v)
+            }
         }
     }
     
@@ -447,6 +537,7 @@ internal class Preview: PreviewWrapper {
     }
     
     private func renderAverage(_ value: CPU_AverageLoad) {
+        guard self.remote == nil else { return }
         if (self.window?.isVisible ?? false) || !self.initializedAverage {
             self.average1Field?.stringValue = "\(value.load1)"
             self.average5Field?.stringValue = "\(value.load5)"
@@ -456,29 +547,57 @@ internal class Preview: PreviewWrapper {
         }
     }
     
-    public func fleetCallback(_ value: CPU_FleetLoad?) {
+    public func fleetCallback(_ value: CPU_FleetLine?) {
         DispatchQueue.main.async(execute: {
-            self.latestFleet = value
+            self.fleet = value?.hosts.map { entry in
+                let host = self.fleet.first { $0.label == entry.label } ?? FleetHost(label: entry.label)
+                host.record(entry)
+                return host
+            } ?? []
             guard self.contentLoaded else { return }
-            self.renderFleet(value)
+            if self.shape != self.shown {
+                self.reload()
+                return
+            }
+            self.updatePicker()
+            if let host = self.remote, self.window?.isVisible ?? false {
+                self.renderRemote(host)
+            }
         })
     }
     
-    private func renderFleet(_ value: CPU_FleetLoad?) {
-        guard let value, !value.hosts.isEmpty, let rows = self.fleetRows else {
-            self.fleetSection?.isHidden = true
-            return
+    /// The page for another machine: its last reading, each core's mean over the kept readings in
+    /// the core's tooltip, and its usage history.
+    private func renderRemote(_ host: FleetHost) {
+        let title = host.title
+        self.titleField?.stringValue = title.name
+        self.clustersField?.stringValue = title.cores
+        self.loadLineChart?.historyUpdated()
+        guard let entry = host.latest, let cpu = entry.cpu else { return }
+        
+        self.renderSplit(
+            total: (100 - cpu.idle) / 100,
+            system: cpu.system / 100,
+            user: cpu.user / 100,
+            idle: cpu.idle / 100,
+            perCore: (entry.perCore ?? []).map { $0 / 100 }
+        )
+        for (i, mean) in host.coreMeans.enumerated() {
+            self.cores.first(where: { $0.identifier?.rawValue == "\(i)" })?.toolTip =
+                "\(localizedString("Average")), \(host.minutes) min: \(Int((mean * 100).rounded()))%"
         }
-        let labels = value.hosts.map { $0.label }
-        if labels != self.fleetLabels {
-            rows.arrangedSubviews.forEach { $0.removeFromSuperview() }
-            self.fleetFields = labels.map { previewRow(rows, title: "\($0):", value: "") }
-            self.fleetLabels = labels
+        
+        let loads = entry.loads ?? []
+        for (field, load) in zip([self.average1Field, self.average5Field, self.average15Field], loads) {
+            field?.stringValue = String(format: "%.2f", load)
         }
-        for (host, field) in zip(value.hosts, self.fleetFields) {
-            host.show(in: field)
+        
+        let top = entry.top ?? []
+        for (i, row) in self.remoteProcesses.enumerated() {
+            let process = top.indices.contains(i) ? top[i] : nil
+            row.name.stringValue = process?.name ?? ""
+            row.value.stringValue = process.map { String(format: "%d   %.1f%%", $0.pid, $0.cpu) } ?? ""
         }
-        self.fleetSection?.isHidden = false
     }
     
     public func frequencyCallback(_ value: CPU_Frequency?) {

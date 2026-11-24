@@ -2,121 +2,215 @@
 //  fleet.swift
 //  CPU
 //
-//  The fleet load section: the CPU and load averages of every machine the
-//  Anabasis checkout watches, read from its `bun run runs loadwatch --once`
-//  verb while the popup is open.
+//  Other machines' CPU: a command (CPU_fleetLoadCommand) prints one JSON line a
+//  reading for every machine it watches, which the popup summarises and the
+//  preview draws like this Mac's, keeping fifteen minutes of readings each.
 //
 
 import Cocoa
 import Kit
 
-public struct CPU_FleetHost: Codable, Equatable {
-    var label: String
-    var cores: Int? = nil
-    var busy: Double? = nil
-    var loads: [Double] = []
-    var reachable: Bool = true
+/// One line of the command's output: every machine, at one moment.
+public struct CPU_FleetLine: Codable {
+    let hosts: [CPU_FleetEntry]
 }
 
-public struct CPU_FleetLoad: Codable, Equatable {
-    var hosts: [CPU_FleetHost] = []
+/// One machine in a line: its reading when `state` is `read`, else only its state.
+public struct CPU_FleetEntry: Codable {
+    struct Split: Codable { let user: Double; let system: Double; let idle: Double }
+    struct Clusters: Codable { let efficiency: Int; let performance: Int }
+    struct Busiest: Codable, Process_p {
+        let pid: Int
+        let cpu: Double
+        let name: String
+        var icon: NSImage { Constants.defaultProcessIcon }
+    }
+
+    let label: String
+    let local: Bool
+    /// `read`, `connecting` or `unreachable`.
+    let state: String
+    var cores: Int? = nil
+    var model: String? = nil
+    var clusters: Clusters? = nil
+    /// The one-, five- and fifteen-minute load averages.
+    var loads: [Double]? = nil
+    /// The whole CPU over the last interval, in percent.
+    var cpu: Split? = nil
+    /// Each core's busy share over the last interval, in percent; efficiency cores first.
+    var perCore: [Double]? = nil
+    var top: [Busiest]? = nil
 }
 
 internal enum FleetLoad {
     static let enabledKey = "CPU_fleetLoad"
-    static let directoryKey = "CPU_fleetLoadDirectory"
+    static let commandKey = "CPU_fleetLoadCommand"
+    static let selectedKey = "CPU_fleetSelected"
+    /// Fifteen minutes of one-second readings.
+    static let capacity = 900
 
     static var enabled: Bool {
         Store.shared.bool(key: enabledKey, defaultValue: true)
     }
-    /// The checkout to run loadwatch in, set with `defaults write eu.exelban.Stats CPU_fleetLoadDirectory <path>`.
-    static var directory: String {
-        (Store.shared.string(key: directoryKey, defaultValue: "") as NSString).expandingTildeInPath
+    /// The shell command printing the lines, set with `defaults write eu.exelban.Stats CPU_fleetLoadCommand '<command>'`.
+    static var command: String {
+        Store.shared.string(key: commandKey, defaultValue: "")
     }
     static var available: Bool {
-        !directory.isEmpty && FileManager.default.fileExists(atPath: (directory as NSString).appendingPathComponent("package.json"))
-    }
-
-    /// Parses the `--once` frame: a head line per machine (`<label> <n> cores`, or the
-    /// label and `UNREACHABLE` / `connecting…`), then `cpu now … N%` and `load 1m|5m|15m … N%  (x.xx)`.
-    static func parse(_ raw: String) -> CPU_FleetLoad {
-        let ansi = try! NSRegularExpression(pattern: "\u{1B}\\[[0-9;]*[A-Za-z]")
-        var hosts: [CPU_FleetHost] = []
-
-        for rawLine in raw.split(separator: "\n", omittingEmptySubsequences: true) {
-            let full = String(rawLine)
-            let line = ansi.stringByReplacingMatches(in: full, range: NSRange(full.startIndex..., in: full), withTemplate: "")
-            let words = line.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
-            guard let first = words.first else { continue }
-
-            if !line.hasPrefix(" ") {
-                if words.count == 3, words[2] == "cores", let cores = Int(words[1]) {
-                    hosts.append(CPU_FleetHost(label: first, cores: cores))
-                } else if words.count == 2, words[1] == "UNREACHABLE" || words[1].hasPrefix("connecting") {
-                    hosts.append(CPU_FleetHost(label: first, reachable: false))
-                }
-                continue
-            }
-            guard !hosts.isEmpty, hosts[hosts.count - 1].reachable else { continue }
-
-            if first == "cpu", let percent = words.first(where: { $0.hasSuffix("%") }) {
-                hosts[hosts.count - 1].busy = Double(percent.dropLast()).map { $0 / 100 }
-            } else if first == "load", let raw = words.first(where: { $0.hasPrefix("(") && $0.hasSuffix(")") }) {
-                if let load = Double(raw.dropFirst().dropLast()) {
-                    hosts[hosts.count - 1].loads.append(load)
-                }
-            }
-        }
-
-        return CPU_FleetLoad(hosts: hosts)
+        !command.isEmpty
     }
 }
 
-public class FleetLoadReader: Reader<CPU_FleetLoad> {
-    private let timeout: TimeInterval = 30
+/// Runs the command in a login shell while the module and the switch are on, restarting it when it
+/// ends; nil when it stops, so the views clear.
+public class FleetStreamReader: Reader<CPU_FleetLine> {
+    private let queue = DispatchQueue(label: "eu.exelban.Stats.CPU.fleet")
+    private var task: Process? = nil
+    private var output: FileHandle? = nil
+    private var buffer = Data()
+    private var wanted = false
+    private var delay: TimeInterval = 2
 
-    public override func setup() {
-        self.setInterval(10)
+    public override func start() {
+        self.queue.async {
+            self.wanted = FleetLoad.enabled && FleetLoad.available
+            self.wanted ? self.launch() : self.end(clear: true)
+        }
     }
 
-    public override func read() {
-        guard FleetLoad.enabled, FleetLoad.available else {
-            self.callback(nil)
-            return
+    // Always-on: the module pauses only readers that serve a visible view.
+    public override func pause() {}
+
+    public override func stop() {
+        self.queue.sync {
+            self.wanted = false
+            self.end(clear: true)
         }
+    }
+
+    public override func terminate() {
+        self.stop()
+    }
+
+    private func launch() {
+        guard self.wanted, self.task == nil else { return }
 
         let task = Process()
-        // A login shell, so bun and the checkout's PATH resolve as they do in a terminal.
         task.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        task.arguments = ["-lc", "exec bun run --silent runs loadwatch --once"]
-        task.currentDirectoryURL = URL(fileURLWithPath: FleetLoad.directory)
-        var environment = ProcessInfo.processInfo.environment
-        environment["NO_COLOR"] = "1"
-        task.environment = environment
-
-        let outputPipe = Pipe()
-        task.standardOutput = outputPipe
-        task.standardError = FileHandle.nullDevice
+        task.arguments = ["-lc", FleetLoad.command]
         task.standardInput = FileHandle.nullDevice
+        task.standardError = FileHandle.nullDevice
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        let output = pipe.fileHandleForReading
+        output.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            if data.isEmpty { handle.readabilityHandler = nil }
+            self?.queue.async { self?.received(data) }
+        }
+        task.terminationHandler = { [weak self] ended in
+            self?.queue.async {
+                guard let self, self.task === ended else { return }
+                self.end(clear: false)
+                self.queue.asyncAfter(deadline: .now() + self.delay) { self.launch() }
+                self.delay = min(self.delay * 2, 60)
+            }
+        }
 
         do {
             try task.run()
+            self.task = task
+            self.output = output
         } catch let err {
-            error("error read loadwatch: \(err.localizedDescription)", log: self.log)
-            return
+            output.readabilityHandler = nil
+            error("error run fleet command: \(err.localizedDescription)", log: self.log)
         }
-        DispatchQueue.global(qos: .background).asyncAfter(deadline: .now() + self.timeout) {
-            if task.isRunning { task.terminate() }
+    }
+
+    /// Ends the command, closing its output so a child it left behind fails its next write and ends
+    /// too; `clear` empties the views, which a restart keeps.
+    private func end(clear: Bool) {
+        self.output?.readabilityHandler = nil
+        try? self.output?.close()
+        self.output = nil
+        if let task = self.task, task.isRunning { task.terminate() }
+        self.task = nil
+        self.buffer = Data()
+        if clear { self.callbackHandler(nil) }
+    }
+
+    private func received(_ data: Data) {
+        guard self.task != nil else { return }
+        self.buffer.append(data)
+        while let end = self.buffer.firstIndex(of: 0x0A) {
+            let line = self.buffer[self.buffer.startIndex..<end]
+            self.buffer = Data(self.buffer[self.buffer.index(after: end)...])
+            guard let value = try? JSONDecoder().decode(CPU_FleetLine.self, from: line) else { continue }
+            self.delay = 2
+            self.callbackHandler(value)
         }
+    }
+}
 
-        let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
-        outputPipe.fileHandleForReading.closeFile()
-        task.waitUntilExit()
+/// One machine's readings over the last fifteen minutes.
+internal final class FleetHost {
+    let label: String
+    private(set) var local: Bool = false
+    private(set) var state: String = "connecting"
+    /// The last entry that held a reading.
+    private(set) var latest: CPU_FleetEntry? = nil
+    let usage = LineChartData(capacity: FleetLoad.capacity)
+    private var perCore: [[Double]] = []
 
-        guard task.terminationStatus == 0, let raw = String(data: data, encoding: .utf8) else { return }
-        let value = FleetLoad.parse(raw)
-        guard !value.hosts.isEmpty else { return }
-        self.callback(value)
+    init(label: String) {
+        self.label = label
+    }
+
+    func record(_ entry: CPU_FleetEntry) {
+        self.local = entry.local
+        self.state = entry.state
+        guard entry.state == "read", let cpu = entry.cpu else { return }
+        self.latest = entry
+        self.usage.append(DoubleValue((100 - cpu.idle) / 100))
+        if let cores = entry.perCore {
+            self.perCore.append(cores)
+            if self.perCore.count > FleetLoad.capacity { self.perCore.removeFirst() }
+        }
+    }
+
+    /// The minutes the kept readings span.
+    var minutes: Int {
+        max(1, Int((Double(self.perCore.count) / 60).rounded()))
+    }
+
+    /// Each core's mean busy share over the kept readings, out of 1.
+    var coreMeans: [Double] {
+        guard let width = self.perCore.last?.count else { return [] }
+        let kept = self.perCore.filter { $0.count == width }
+        return (0..<width).map { core in kept.reduce(0) { $0 + $1[core] } / Double(kept.count) / 100 }
+    }
+
+    /// The model, then the cores by kind, as the preview's title shows them.
+    var title: (name: String, cores: String) {
+        guard let entry = self.latest else { return (self.label, localizedString(self.state == "unreachable" ? "Unreachable" : "Connecting…")) }
+        var cores = "\(entry.cores ?? 0) cores"
+        if let clusters = entry.clusters {
+            cores = "\(clusters.efficiency) efficiency • \(clusters.performance) performance"
+        }
+        if self.state != "read" {
+            cores += " • \(localizedString(self.state == "unreachable" ? "Unreachable" : "Connecting…"))"
+        }
+        return (entry.model ?? self.label, cores)
+    }
+
+    /// Each core as the preview lays it out: efficiency cores first where the machine has both kinds.
+    var coreKinds: [core_s] {
+        let count = self.latest?.perCore?.count ?? 0
+        let efficiency = self.latest?.clusters?.efficiency
+        return (0..<count).map { i in
+            let type: coreType = efficiency.map { i < $0 ? .efficiency : .performance } ?? .unknown
+            return core_s(id: Int32(i), type: type)
+        }
     }
 }
 
@@ -137,7 +231,7 @@ internal class FleetLoadView: NSStackView {
         self.isHidden = true
 
         let separator = separatorView(localizedString("Fleet load"), width: width)
-        separator.toolTip = "bun run runs loadwatch --once · cpu now, then the 1, 5 and 15 minute load against the cores"
+        separator.toolTip = "CPU now, then the 1, 5 and 15 minute load against the cores"
         self.addArrangedSubview(separator)
         separator.widthAnchor.constraint(equalTo: self.widthAnchor).isActive = true
 
@@ -151,7 +245,7 @@ internal class FleetLoadView: NSStackView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    public func render(_ value: CPU_FleetLoad?) {
+    public func render(_ value: CPU_FleetLine?) {
         guard let value, !value.hosts.isEmpty else {
             if !self.isHidden {
                 self.isHidden = true
@@ -183,19 +277,21 @@ internal class FleetLoadView: NSStackView {
     }
 }
 
-extension CPU_FleetHost {
+extension CPU_FleetEntry {
     /// CPU busy now, then the 1, 5 and 15 minute load against the cores out of 100, and the queue beyond them.
     var summary: String {
-        guard self.reachable else { return localizedString("Unreachable") }
-        let cpu = self.busy.map { "\(Int(($0 * 100).rounded()))%" } ?? "–"
-        let loads = self.loads.map { "\(min(100, self.perCore($0)))" }.joined(separator: " · ")
-        let queued = self.loads.first.flatMap { load in self.cores.map { Int((load - Double($0)).rounded()) } } ?? 0
-        return "\(cpu)  \(loads)\(queued > 0 ? "  +\(queued)" : "")"
+        guard self.state == "read", let loads = self.loads else {
+            return localizedString(self.state == "unreachable" ? "Unreachable" : "Connecting…")
+        }
+        let cpu = self.cpu.map { "\(Int((100 - $0.idle).rounded()))%" } ?? "–"
+        let shares = loads.map { "\(min(100, self.perCore($0)))" }.joined(separator: " · ")
+        let queued = loads.first.flatMap { load in self.cores.map { Int((load - Double($0)).rounded()) } } ?? 0
+        return "\(cpu)  \(shares)\(queued > 0 ? "  +\(queued)" : "")"
     }
 
     var tint: NSColor {
-        guard self.reachable else { return .systemRed }
-        guard let load = self.loads.first else { return .textColor }
+        guard self.state == "read" else { return self.state == "unreachable" ? .systemRed : .secondaryLabelColor }
+        guard let load = self.loads?.first else { return .textColor }
         let share = self.perCore(load)
         return share >= 100 ? .systemRed : share >= 75 ? .systemOrange : .textColor
     }
@@ -203,7 +299,7 @@ extension CPU_FleetHost {
     func show(in field: NSTextField) {
         field.stringValue = self.summary
         field.textColor = self.tint
-        field.toolTip = self.cores.map { "\($0) cores, load \(self.loads.map { String(format: "%.2f", $0) }.joined(separator: " / "))" }
+        field.toolTip = self.cores.map { "\($0) cores, load \((self.loads ?? []).map { String(format: "%.2f", $0) }.joined(separator: " / "))" }
     }
 
     private func perCore(_ load: Double) -> Int {
