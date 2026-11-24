@@ -152,8 +152,9 @@ public class CPU: Module {
             self?.popupView.averageCallback(value)
             self?.previewView.averageCallback(value)
         }
-        self.fleetLoadReader = FleetLoadReader(.CPU, popup: true) { [weak self] value in
+        self.fleetLoadReader = FleetLoadReader(.CPU, popup: true, preview: true) { [weak self] value in
             self?.popupView.fleetCallback(value)
+            self?.previewView.fleetCallback(value)
         }
         self.temperatureReader = TemperatureReader(.CPU, popup: true) { [weak self] value in
             self?.popupView.temperatureCallback(value)

@@ -173,9 +173,7 @@ internal class FleetLoadView: NSStackView {
         }
 
         for (host, field) in zip(value.hosts, self.fields) {
-            field.stringValue = FleetLoadView.text(host)
-            field.textColor = FleetLoadView.color(host)
-            field.toolTip = host.cores.map { "\($0) cores, load \(host.loads.map { String(format: "%.2f", $0) }.joined(separator: " / "))" }
+            host.show(in: field)
         }
 
         if rebuilt || self.isHidden {
@@ -183,24 +181,33 @@ internal class FleetLoadView: NSStackView {
             self.resized()
         }
     }
+}
 
-    private static func perCore(_ host: CPU_FleetHost, _ load: Double) -> Int {
-        guard let cores = host.cores, cores > 0 else { return 0 }
-        return Int((100 * load / Double(cores)).rounded())
-    }
-
-    private static func text(_ host: CPU_FleetHost) -> String {
-        guard host.reachable else { return localizedString("Unreachable") }
-        let cpu = host.busy.map { "\(Int(($0 * 100).rounded()))%" } ?? "–"
-        let loads = host.loads.map { "\(min(100, perCore(host, $0)))" }.joined(separator: " · ")
-        let queued = host.loads.first.flatMap { load in host.cores.map { Int((load - Double($0)).rounded()) } } ?? 0
+extension CPU_FleetHost {
+    /// CPU busy now, then the 1, 5 and 15 minute load against the cores out of 100, and the queue beyond them.
+    var summary: String {
+        guard self.reachable else { return localizedString("Unreachable") }
+        let cpu = self.busy.map { "\(Int(($0 * 100).rounded()))%" } ?? "–"
+        let loads = self.loads.map { "\(min(100, self.perCore($0)))" }.joined(separator: " · ")
+        let queued = self.loads.first.flatMap { load in self.cores.map { Int((load - Double($0)).rounded()) } } ?? 0
         return "\(cpu)  \(loads)\(queued > 0 ? "  +\(queued)" : "")"
     }
 
-    private static func color(_ host: CPU_FleetHost) -> NSColor {
-        guard host.reachable else { return .systemRed }
-        guard let load = host.loads.first else { return .textColor }
-        let share = perCore(host, load)
+    var tint: NSColor {
+        guard self.reachable else { return .systemRed }
+        guard let load = self.loads.first else { return .textColor }
+        let share = self.perCore(load)
         return share >= 100 ? .systemRed : share >= 75 ? .systemOrange : .textColor
+    }
+
+    func show(in field: NSTextField) {
+        field.stringValue = self.summary
+        field.textColor = self.tint
+        field.toolTip = self.cores.map { "\($0) cores, load \(self.loads.map { String(format: "%.2f", $0) }.joined(separator: " / "))" }
+    }
+
+    private func perCore(_ load: Double) -> Int {
+        guard let cores = self.cores, cores > 0 else { return 0 }
+        return Int((100 * load / Double(cores)).rounded())
     }
 }
