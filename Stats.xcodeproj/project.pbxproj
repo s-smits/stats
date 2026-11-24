@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		5CA0F1E62FC4A10000D1F00D /* fleet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CA0F1E52FC4A10000D1F00D /* fleet.swift */; };
 		4A05F9BD83C04F70BFFF7F37 /* Kit.swift in Sources */ = {isa = PBXBuildFile; fileRef = 369463B2B7EA4AF0A895A9B6 /* Kit.swift */; };
 		5C038CF62D86EE8A00516809 /* SystemStats.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C038CF52D86EE8700516809 /* SystemStats.swift */; };
 		5C044F7A2B3DE6F3005F6951 /* portal.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C044F792B3DE6F3005F6951 /* portal.swift */; };
@@ -537,6 +538,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		5CA0F1E52FC4A10000D1F00D /* fleet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = fleet.swift; sourceTree = "<group>"; };
 		0192A7ED2B017E190056F918 /* hi */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = hi; path = hi.lproj/Localizable.strings; sourceTree = "<group>"; };
 		13BE56042D0E6963001C58EC /* en-AU */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "en-AU"; path = "en-AU.lproj/Localizable.strings"; sourceTree = "<group>"; };
 		2658929724FC0F3B00FB3B6A /* zh-Hans */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "zh-Hans"; path = "zh-Hans.lproj/Localizable.strings"; sourceTree = "<group>"; };
@@ -1272,6 +1274,7 @@
 			children = (
 				9A97CEE82537338600742D8F /* main.swift */,
 				9A97CEF0253733D200742D8F /* readers.swift */,
+				5CA0F1E52FC4A10000D1F00D /* fleet.swift */,
 				9A97CEF5253733E400742D8F /* popup.swift */,
 				5C23BC0129A0102500DBA990 /* portal.swift */,
 				9A97CEFA253733F300742D8F /* settings.swift */,
@@ -2377,6 +2380,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				9A97CEF1253733D200742D8F /* readers.swift in Sources */,
+				5CA0F1E62FC4A10000D1F00D /* fleet.swift in Sources */,
 				9A97CEF6253733E400742D8F /* popup.swift in Sources */,
 				5C4A1F5D2F6099AA009CFEE6 /* preview.swift in Sources */,
 				5C3068732C32E83200B05EFA /* widget.swift in Sources */,

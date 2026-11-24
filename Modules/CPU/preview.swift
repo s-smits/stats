@@ -76,6 +76,11 @@ internal class Preview: PreviewWrapper {
     private var cores: [CoreView] = []
     private var processes: ProcessesView? = nil
     private var processesSection: PreferencesSection? = nil
+    private var fleetSection: PreferencesSection? = nil
+    private var fleetRows: NSStackView? = nil
+    private var fleetLabels: [String] = []
+    private var fleetFields: [ValueField] = []
+    private var latestFleet: CPU_FleetLoad? = nil
     
     private var numberOfProcesses: Int {
         Store.shared.int(key: "\(self.module.stringValue)_processes", defaultValue: 8)
@@ -98,6 +103,7 @@ internal class Preview: PreviewWrapper {
         
         self.addArrangedSubview(splitView)
         
+        self.addArrangedSubview(self.fleetView())
         self.addArrangedSubview(self.topProcesses())
         
         self.addArrangedSubview(NSView())
@@ -106,6 +112,7 @@ internal class Preview: PreviewWrapper {
         if let value = self.latestAverage { self.renderAverage(value) }
         if let value = self.latestFrequency { self.renderFrequency(value) }
         if let list = self.latestProcesses { self.renderProcesses(list) }
+        self.renderFleet(self.latestFleet)
     }
     
     public override func unloadContent() {
@@ -128,6 +135,10 @@ internal class Preview: PreviewWrapper {
         self.pCoresFreqField = nil
         self.processes = nil
         self.processesSection = nil
+        self.fleetSection = nil
+        self.fleetRows = nil
+        self.fleetLabels = []
+        self.fleetFields = []
         self.initialized = false
         self.initializedAverage = false
         self.initializedFrequency = false
@@ -324,6 +335,20 @@ internal class Preview: PreviewWrapper {
         return view
     }
     
+    private func fleetView() -> NSView {
+        let view = NSStackView()
+        view.orientation = .vertical
+        view.distribution = .fillEqually
+        view.spacing = 2
+        self.fleetRows = view
+        
+        let section = PreferencesSection(title: localizedString("Fleet load"), [view])
+        section.toolTip = "bun run runs loadwatch --once · cpu now, then the 1, 5 and 15 minute load against the cores"
+        section.isHidden = true
+        self.fleetSection = section
+        return section
+    }
+    
     private func topProcesses() -> NSView {
         let view = ProcessesView(
             values: [(localizedString("Usage"), nil)],
@@ -429,6 +454,31 @@ internal class Preview: PreviewWrapper {
             
             self.initializedAverage = true
         }
+    }
+    
+    public func fleetCallback(_ value: CPU_FleetLoad?) {
+        DispatchQueue.main.async(execute: {
+            self.latestFleet = value
+            guard self.contentLoaded else { return }
+            self.renderFleet(value)
+        })
+    }
+    
+    private func renderFleet(_ value: CPU_FleetLoad?) {
+        guard let value, !value.hosts.isEmpty, let rows = self.fleetRows else {
+            self.fleetSection?.isHidden = true
+            return
+        }
+        let labels = value.hosts.map { $0.label }
+        if labels != self.fleetLabels {
+            rows.arrangedSubviews.forEach { $0.removeFromSuperview() }
+            self.fleetFields = labels.map { previewRow(rows, title: "\($0):", value: "") }
+            self.fleetLabels = labels
+        }
+        for (host, field) in zip(value.hosts, self.fleetFields) {
+            host.show(in: field)
+        }
+        self.fleetSection?.isHidden = false
     }
     
     public func frequencyCallback(_ value: CPU_Frequency?) {
