@@ -89,6 +89,8 @@ internal class Popup: PopupWrapper {
     private let frequencyCache = PopupCache<CPU_Frequency?>()
     private let limitCache = PopupCache<CPU_Limit>()
     private let averageCache = PopupCache<CPU_AverageLoad>()
+    private let fleetCache = PopupCache<CPU_FleetLoad?>()
+    private var fleetView: FleetLoadView? = nil
     
     private var processes: ProcessesView? = nil
     private var lineChartHistory: Int = 180
@@ -160,6 +162,7 @@ internal class Popup: PopupWrapper {
         self.addSection(self.initChart())
         self.addSection(self.initDetails())
         self.addSection(self.initAverage())
+        self.addSection(self.initFleet())
         self.addSection(self.initProcesses())
         
         self.replay(self.frequencyCache, render: self.renderFrequency)
@@ -200,6 +203,7 @@ internal class Popup: PopupWrapper {
         self.circle = nil
         self.processes = nil
         self.processesView = nil
+        self.fleetView = nil
     }
     
     public override func appear() {
@@ -209,6 +213,7 @@ internal class Popup: PopupWrapper {
         self.replay(self.frequencyCache, render: self.renderFrequency)
         self.replay(self.limitCache, render: self.renderLimit)
         self.replay(self.averageCache, render: self.renderAverage)
+        self.replay(self.fleetCache, render: self.renderFleet)
         self.replay(self.processCache, render: self.renderProcesses)
     }
     
@@ -384,6 +389,13 @@ internal class Popup: PopupWrapper {
         return view
     }
     
+    private func initFleet() -> NSView {
+        let view = FleetLoadView(width: self.frame.width)
+        view.resized = { [weak self] in self?.resizeToFitContent() }
+        self.fleetView = view
+        return view
+    }
+    
     private func initProcesses() -> NSView {
         if self.numberOfProcesses == 0 {
             let v = NSView()
@@ -537,6 +549,14 @@ internal class Popup: PopupWrapper {
         self.average1Field?.stringValue = "\(value.load1)"
         self.average5Field?.stringValue = "\(value.load5)"
         self.average15Field?.stringValue = "\(value.load15)"
+    }
+    
+    public func fleetCallback(_ value: CPU_FleetLoad?) {
+        self.apply(value, to: self.fleetCache, render: self.renderFleet)
+    }
+    
+    private func renderFleet(_ value: CPU_FleetLoad?) {
+        self.fleetView?.render(value)
     }
     
     // MARK: - Settings

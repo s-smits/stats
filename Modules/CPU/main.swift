@@ -67,6 +67,7 @@ public class CPU: Module {
     private var frequencyReader: FrequencyReader? = nil
     private var limitReader: LimitReader? = nil
     private var averageLoadReader: AverageLoadReader? = nil
+    private var fleetLoadReader: FleetLoadReader? = nil
     
     private var usagePerCoreState: Bool {
         Store.shared.bool(key: "\(self.config.name)_usagePerCore", defaultValue: false)
@@ -151,6 +152,9 @@ public class CPU: Module {
             self?.popupView.averageCallback(value)
             self?.previewView.averageCallback(value)
         }
+        self.fleetLoadReader = FleetLoadReader(.CPU, popup: true) { [weak self] value in
+            self?.popupView.fleetCallback(value)
+        }
         self.temperatureReader = TemperatureReader(.CPU, popup: true) { [weak self] value in
             self?.popupView.temperatureCallback(value)
         }
@@ -177,6 +181,11 @@ public class CPU: Module {
                 self?.processReader?.read()
             }
         }
+        self.settingsView.callbackWhenToggleFleetLoad = { [weak self] in
+            DispatchQueue.global(qos: .background).async { [weak self] in
+                self?.fleetLoadReader?.read()
+            }
+        }
         self.settingsView.setInterval = { [weak self] value in
             self?.loadReader?.setInterval(value)
         }
@@ -190,7 +199,8 @@ public class CPU: Module {
             self.temperatureReader,
             self.frequencyReader,
             self.limitReader,
-            self.averageLoadReader
+            self.averageLoadReader,
+            self.fleetLoadReader
         ])
     }
     

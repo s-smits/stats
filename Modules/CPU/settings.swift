@@ -26,6 +26,7 @@ internal class Settings: NSStackView, Settings_v {
     
     public var callback: (() -> Void) = {}
     public var callbackWhenUpdateNumberOfProcesses: (() -> Void) = {}
+    public var callbackWhenToggleFleetLoad: (() -> Void) = {}
     public var setInterval: ((_ value: Int) -> Void) = {_ in }
     public var setTopInterval: ((_ value: Int) -> Void) = {_ in }
     
@@ -83,6 +84,15 @@ internal class Settings: NSStackView, Settings_v {
                 selected: "\(self.numberOfProcesses)"
             ))
         ]))
+        
+        if FleetLoad.available {
+            self.addArrangedSubview(PreferencesSection([
+                PreferencesRow(localizedString("Show fleet load (bun run runs loadwatch)"), component: self.switchView(
+                    action: #selector(self.toggleFleetLoad),
+                    state: FleetLoad.enabled
+                ))
+            ]))
+        }
         
         if widgets.contains(.barChart) {
             self.splitValueView = self.switchView(
@@ -172,6 +182,11 @@ internal class Settings: NSStackView, Settings_v {
             Store.shared.set(key: "\(self.title)_clustersGroup", value: self.clustersGroupState)
             self.groupByClustersView?.state = .off
         }
+    }
+    
+    @objc func toggleFleetLoad(_ sender: NSControl) {
+        Store.shared.set(key: FleetLoad.enabledKey, value: controlState(sender))
+        self.callbackWhenToggleFleetLoad()
     }
     
     @objc func toggleMultithreading(_ sender: NSControl) {
