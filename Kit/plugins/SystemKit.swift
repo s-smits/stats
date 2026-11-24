@@ -141,6 +141,11 @@ public struct os_s {
 public struct core_s: Codable {
     public var id: Int32
     public var type: coreType
+    
+    public init(id: Int32, type: coreType) {
+        self.id = id
+        self.type = type
+    }
 }
 
 public struct cpu_s: Codable {
